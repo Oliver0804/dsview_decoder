@@ -1,0 +1,12 @@
+# 忽略 Python 編譯後的快取檔案
+__pycache__/
+*.py[cod]
+
+# 忽略 macOS 的系統檔案
+.DS_Store
+
+# 其他常見忽略的檔案
+*.log
+*.tmp
+*.swp
+
