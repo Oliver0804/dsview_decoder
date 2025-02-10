@@ -23,7 +23,7 @@ This project provides a DSView-based decoder for analyzing SPI communication wit
 
 ## Demo
 The following images show the decoder in action:
-![Demo Image 1](demo1.png)
+![Demo Image 1](demo.png)
 ![Demo Image 2](demo2.png)
 
 ## License
