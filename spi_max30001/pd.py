@@ -3,6 +3,58 @@ from collections import namedtuple
 
 Data = namedtuple('Data', ['ss', 'es', 'val'])
 
+MAX30001_REGISTERS = {
+    0x00: "NO_OP",
+    0x01: "STATUS",
+    0x02: "EN_INT",
+    0x03: "EN_INT2",
+    0x04: "MNGR_INT",
+    0x05: "MNGR_DYN",
+    0x08: "SW_RST",
+    0x09: "SYNCH",
+    0x0A: "FIFO_RST",
+    0x0F: "INFO",
+    0x10: "CNFG_GEN",
+    0x12: "CNFG_CAL",
+    0x14: "CNFG_EMUX",
+    0x15: "CNFG_ECG",
+    0x17: "CNFG_BMUX",
+    0x18: "CNFG_BioZ",
+    0x1A: "CNFG_PACE",
+    0x1D: "CNFG_RTOR1",
+    0x1E: "CNFG_RTOR2",
+    0x20: "ECG_FIFO_BURST",
+    0x21: "ECG_FIFO",
+    0x22: "BIOZ_FIFO_BURST",
+    0x23: "BIOZ_FIFO",
+    0x25: "RTOR",
+    0x30: "PACE0_BURST",
+    0x31: "PACE0_A",
+    0x32: "PACE0_B",
+    0x33: "PACE0_C",
+    0x34: "PACE1_BURST",
+    0x35: "PACE1_A",
+    0x36: "PACE1_B",
+    0x37: "PACE1_C",
+    0x38: "PACE2_BURST",
+    0x39: "PACE2_A",
+    0x3A: "PACE2_B",
+    0x3B: "PACE2_C",
+    0x3C: "PACE3_BURST",
+    0x3D: "PACE3_A",
+    0x3E: "PACE3_B",
+    0x3F: "PACE3_C",
+    0x40: "PACE4_BURST",
+    0x41: "PACE4_A",
+    0x42: "PACE4_B",
+    0x43: "PACE4_C",
+    0x44: "PACE5_BURST",
+    0x45: "PACE5_A",
+    0x46: "PACE5_B",
+    0x47: "PACE5_C",
+    0x7F: "NO_OP"
+}
+
 '''
 OUTPUT_PYTHON format:
 
@@ -86,14 +138,20 @@ class Decoder(srd.Decoder):
     annotations = (
         ('106', 'miso-data', 'MISO data'),
         ('108', 'mosi-data', 'MOSI data'),
-        ('read', 'MAX30001_Read', 'MAX30001 Read Data'),
+        ('reg', 'Register', 'Register Name'),  # Add this line
         ('write', 'MAX30001_Write', 'MAX30001 Write Data'),
+        ('read', 'MAX30001_Read', 'MAX30001 Read Data'),
+
+
     )
     annotation_rows = (
         ('miso-data', 'MISO data', (0,)),
         ('mosi-data', 'MOSI data', (1,)),
-        ('max30001-read', 'MAX30001 Read', (2,)),
+        ('register-name', 'Register', (2,)), 
         ('max30001-write', 'MAX30001 Write', (3,)),
+        ('max30001-read', 'MAX30001 Read', (4,)),
+
+
     )
 
     def __init__(self):
@@ -141,7 +199,7 @@ class Decoder(srd.Decoder):
             self.put(ss, es, self.out_ann, [1, ['%02X' % self.mosidata]])
             self.mosi_buffer.append((self.mosidata, ss, es))
 
-        # MAX30001 4-byte 解碼
+         # MAX30001 4-byte 解碼
         if len(self.mosi_buffer) == 4 and len(self.miso_buffer) == 4:
             start_ss = min(self.mosi_buffer[0][1], self.miso_buffer[0][1])
             end_es = max(self.mosi_buffer[3][2], self.miso_buffer[3][2])
@@ -151,6 +209,12 @@ class Decoder(srd.Decoder):
             address = (first_byte_mosi >> 1) & 0x7F  # 7-bit address
             rw_bit = first_byte_mosi & 0x01          # read/write bit
 
+            # Get register name
+            reg_name = MAX30001_REGISTERS.get(address, "UNKNOWN")
+            
+            # Add register name annotation
+            self.put(start_ss, end_es, self.out_ann, [2, [reg_name]])
+            
             # 根據讀寫位選擇數據來源
             if rw_bit:  # Read operation (r=1)，從 MISO 讀取數據
                 data_value = 0
@@ -158,14 +222,14 @@ class Decoder(srd.Decoder):
                     data_value |= (self.miso_buffer[i][0] << ((3-i) * 8))
                 
                 self.put(start_ss, end_es, self.out_ann,
-                        [2, ['Read Addr:0x%02X Data:0x%06X' % (address, data_value)]])
+                        [4, ['Read (0x%02X) Data:0x%06X' % (address, data_value)]])
             else:  # Write operation (r=0)，從 MOSI 讀取數據
                 data_value = 0
                 for i in range(1, 4):
                     data_value |= (self.mosi_buffer[i][0] << ((3-i) * 8))
                 
                 self.put(start_ss, end_es, self.out_ann,
-                        [3, ['Write Addr:0x%02X Data:0x%06X' % (address, data_value)]])
+                        [3, ['Write (0x%02X) Data:0x%06X' % (address, data_value)]])
 
             # 清空兩個 buffer
             self.mosi_buffer = []
