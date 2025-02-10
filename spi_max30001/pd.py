@@ -1,8 +1,57 @@
 import sigrokdecode as srd
 from collections import namedtuple
 
-# 新增數據結構定義
 Data = namedtuple('Data', ['ss', 'es', 'val'])
+
+'''
+OUTPUT_PYTHON format:
+
+Packet:
+[<ptype>, <data1>, <data2>]
+
+<ptype>:
+ - 'DATA': <data1> contains the MOSI data, <data2> contains the MISO data.
+   The data is _usually_ 8 bits (but can also be fewer or more bits).
+   Both data items are Python numbers (not strings), or None if the respective
+   channel was not supplied.
+ - 'BITS': <data1>/<data2> contain a list of bit values in this MOSI/MISO data
+   item, and for each of those also their respective start-/endsample numbers.
+ - 'CS-CHANGE': <data1> is the old CS# pin value, <data2> is the new value.
+   Both data items are Python numbers (0/1), not strings. At the beginning of
+   the decoding a packet is generated with <data1> = None and <data2> being the
+   initial state of the CS# pin or None if the chip select pin is not supplied.
+ - 'TRANSFER': <data1>/<data2> contain a list of Data() namedtuples for each
+   byte transferred during this block of CS# asserted time. Each Data() has
+   fields ss, es, and val.
+
+Examples:
+ ['CS-CHANGE', None, 1]
+ ['CS-CHANGE', 1, 0]
+ ['DATA', 0xff, 0x3a]
+ ['BITS', [[1, 80, 82], [1, 83, 84], [1, 85, 86], [1, 87, 88],
+           [1, 89, 90], [1, 91, 92], [1, 93, 94], [1, 95, 96]],
+          [[0, 80, 82], [1, 83, 84], [0, 85, 86], [1, 87, 88],
+           [1, 89, 90], [1, 91, 92], [0, 93, 94], [0, 95, 96]]]
+ ['DATA', 0x65, 0x00]
+ ['DATA', 0xa8, None]
+ ['DATA', None, 0x55]
+ ['CS-CHANGE', 0, 1]
+ ['TRANSFER', [Data(ss=80, es=96, val=0xff), ...],
+              [Data(ss=80, es=96, val=0x3a), ...]]
+'''
+
+# Key: (CPOL, CPHA). Value: SPI mode.
+# Clock polarity (CPOL) = 0/1: Clock is low/high when inactive.
+# Clock phase (CPHA) = 0/1: Data is valid on the leading/trailing clock edge.
+spi_mode = {
+    (0, 0): 0, # Mode 0
+    (0, 1): 1, # Mode 1
+    (1, 0): 2, # Mode 2
+    (1, 1): 3, # Mode 3
+}
+
+class ChannelError(Exception):
+    pass
 
 class Decoder(srd.Decoder):
     api_version = 3
@@ -15,167 +64,228 @@ class Decoder(srd.Decoder):
     outputs = ['max30001']
     tags = ['Embedded/industrial']
     channels = (
-        {'id': 'clk', 'type': 0, 'name': 'CLK', 'desc': 'Clock'},
-        {'id': 'cs', 'type': -1, 'name': 'CS#', 'desc': 'Chip-select'},
+        {'id': 'clk', 'type': 0, 'name': 'CLK', 'desc': 'Clock', 'idn':'dec_0spi_chan_clk'},
     )
     optional_channels = (
-        {'id': 'miso', 'type': 107, 'name': 'MISO', 'desc': 'Master in, slave out'},
-        {'id': 'mosi', 'type': 109, 'name': 'MOSI', 'desc': 'Master out, slave in'},
+        {'id': 'miso', 'type': 107, 'name': 'MISO', 'desc': 'Master in, slave out', 'idn':'dec_0spi_opt_chan_miso'},
+        {'id': 'mosi', 'type': 109, 'name': 'MOSI', 'desc': 'Master out, slave in', 'idn':'dec_0spi_opt_chan_mosi'},
+        {'id': 'cs', 'type': -1, 'name': 'CS#', 'desc': 'Chip-select', 'idn':'dec_0spi_opt_chan_cs'},
     )
     options = (
-        {'id': 'bitorder', 'desc': 'Bit order', 'default': 'msb-first', 'values': ('msb-first', 'lsb-first')},
+        {'id': 'cs_polarity', 'desc': 'CS# polarity', 'default': 'active-low',
+            'values': ('active-low', 'active-high'), 'idn':'dec_0spi_opt_cs_pol'},
+        {'id': 'cpol', 'desc': 'Clock polarity (CPOL)', 'default': 0,
+            'values': (0, 1), 'idn':'dec_0spi_opt_cpol'},
+        {'id': 'cpha', 'desc': 'Clock phase (CPHA)', 'default': 0,
+            'values': (0, 1), 'idn':'dec_0spi_opt_cpha'},
+        {'id': 'bitorder', 'desc': 'Bit order',
+            'default': 'msb-first', 'values': ('msb-first', 'lsb-first'), 'idn':'dec_0spi_opt_bitorder'},
+        {'id': 'wordsize', 'desc': 'Word size', 'default': 8,
+            'values': tuple(range(4,129,1)), 'idn':'dec_0spi_opt_wordsize'},
     )
     annotations = (
-        ('cmd', 'Command', 'SPI Command'),
-        ('read', 'Read', 'SPI Read'),
-        ('write', 'Write', 'SPI Write'),
-        ('data_r', 'Data Read', 'SPI Data Read'),
-        ('data_w', 'Data Write', 'SPI Data Write'),
-        ('miso', 'MISO', 'MISO Data'),  # 新增 MISO 數據顯示
-        ('mosi', 'MOSI', 'MOSI Data'),  # 新增 MOSI 數據顯示
+        ('106', 'miso-data', 'MISO data'),
+        ('108', 'mosi-data', 'MOSI data'),
+        ('read', 'MAX30001_Read', 'MAX30001 Read Data'),
+        ('write', 'MAX30001_Write', 'MAX30001 Write Data'),
     )
     annotation_rows = (
-        ('commands', 'Commands', (0,)),
-        ('read', 'Read', (1,)),
-        ('write', 'Write', (2,)),
-        ('data_r', 'Data Read', (3,)),
-        ('data_w', 'Data Write', (4,)),
-        ('raw_data', 'Raw Data', (5, 6)),  # 新增原始數據行
+        ('miso-data', 'MISO data', (0,)),
+        ('mosi-data', 'MOSI data', (1,)),
+        ('max30001-read', 'MAX30001 Read', (2,)),
+        ('max30001-write', 'MAX30001 Write', (3,)),
     )
 
     def __init__(self):
         self.reset()
+        self.miso_buffer = []  # 重新命名為 miso_buffer
+        self.mosi_buffer = []  # 新增 mosi_buffer
 
     def reset(self):
+        self.samplerate = None
         self.bitcount = 0
-        self.word = 0
-        self.bytecount = 0
-        self.transaction = []
-        self.cs_active = False
-        self.start_sample = None
-        self.rw_flag = None
-        self.word_miso = 0
-        self.word_mosi = 0
-        self.transaction_miso = []
-        self.transaction_mosi = []
+        self.misodata = self.mosidata = 0
+        self.misobits = []
+        self.mosibits = []
+        self.ss_block = -1
+        self.samplenum = -1
+        self.ss_transfer = -1
+        self.cs_was_deasserted = False
+        self.have_cs = self.have_miso = self.have_mosi = None
+        self.miso_buffer = []  # 重新命名為 miso_buffer
+        self.mosi_buffer = []  # 新增 mosi_buffer
 
     def start(self):
         self.out_ann = self.register(srd.OUTPUT_ANN)
-        self.out_python = self.register(srd.OUTPUT_PYTHON)  # 註冊 Python 輸出
-        # 確認必要的通道存在
+        self.bw = (self.options['wordsize'] + 7) // 8
+
+    def metadata(self, key, value):
+       if key == srd.SRD_CONF_SAMPLERATE:
+            self.samplerate = value
+
+    def putw(self, data):
+        self.put(self.ss_block, self.samplenum, self.out_ann, data)
+
+    def putdata(self):
+        so = self.misodata if self.have_miso else None
+        si = self.mosidata if self.have_mosi else None
+
+        # 原始 1-byte SPI 解碼
+        if self.have_miso:
+            ss, es = self.misobits[-1][1], self.misobits[0][2]
+            self.put(ss, es, self.out_ann, [0, ['%02X' % self.misodata]])
+            self.miso_buffer.append((self.misodata, ss, es))
+            
+        if self.have_mosi:
+            ss, es = self.mosibits[-1][1], self.mosibits[0][2]
+            self.put(ss, es, self.out_ann, [1, ['%02X' % self.mosidata]])
+            self.mosi_buffer.append((self.mosidata, ss, es))
+
+        # MAX30001 4-byte 解碼
+        if len(self.mosi_buffer) == 4 and len(self.miso_buffer) == 4:
+            start_ss = min(self.mosi_buffer[0][1], self.miso_buffer[0][1])
+            end_es = max(self.mosi_buffer[3][2], self.miso_buffer[3][2])
+
+            # 從 MOSI 第一個 byte 獲取讀寫位
+            first_byte_mosi = self.mosi_buffer[0][0]
+            address = (first_byte_mosi >> 1) & 0x7F  # 7-bit address
+            rw_bit = first_byte_mosi & 0x01          # read/write bit
+
+            # 根據讀寫位選擇數據來源
+            if rw_bit:  # Read operation (r=1)，從 MISO 讀取數據
+                data_value = 0
+                for i in range(1, 4):
+                    data_value |= (self.miso_buffer[i][0] << ((3-i) * 8))
+                
+                self.put(start_ss, end_es, self.out_ann,
+                        [2, ['Read Addr:0x%02X Data:0x%06X' % (address, data_value)]])
+            else:  # Write operation (r=0)，從 MOSI 讀取數據
+                data_value = 0
+                for i in range(1, 4):
+                    data_value |= (self.mosi_buffer[i][0] << ((3-i) * 8))
+                
+                self.put(start_ss, end_es, self.out_ann,
+                        [3, ['Write Addr:0x%02X Data:0x%06X' % (address, data_value)]])
+
+            # 清空兩個 buffer
+            self.mosi_buffer = []
+            self.miso_buffer = []
+
+    def reset_decoder_state(self):
+        self.misodata = 0 if self.have_miso else None
+        self.mosidata = 0 if self.have_mosi else None
+        self.misobits = [] if self.have_miso else None
+        self.mosibits = [] if self.have_mosi else None
+        self.bitcount = 0
+
+    def cs_asserted(self, cs):
+        active_low = (self.options['cs_polarity'] == 'active-low')
+        return (cs == 0) if active_low else (cs == 1)
+
+    def handle_bit(self, miso, mosi, clk, cs):
+        # If this is the first bit of a dataword, save its sample number.
+        if self.bitcount == 0:
+            self.ss_block = self.samplenum
+            self.cs_was_deasserted = \
+                not self.cs_asserted(cs) if self.have_cs else False
+
+        ws = self.options['wordsize']
+        bo = self.options['bitorder']
+
+        # Receive MISO bit into our shift register.
+        if self.have_miso:
+            if bo == 'msb-first':
+                self.misodata |= miso << (ws - 1 - self.bitcount)
+            else:
+                self.misodata |= miso << self.bitcount
+
+        # Receive MOSI bit into our shift register.
+        if self.have_mosi:
+            if bo == 'msb-first':
+                self.mosidata |= mosi << (ws - 1 - self.bitcount)
+            else:
+                self.mosidata |= mosi << self.bitcount
+
+        # Guesstimate the endsample for this bit (can be overridden below).
+        es = self.samplenum
+        if self.bitcount > 0:
+            if self.have_miso:
+                es += self.samplenum - self.misobits[0][1]
+            elif self.have_mosi:
+                es += self.samplenum - self.mosibits[0][1]
+
+        if self.have_miso:
+            self.misobits.insert(0, [miso, self.samplenum, es])
+        if self.have_mosi:
+            self.mosibits.insert(0, [mosi, self.samplenum, es])
+
+        if self.bitcount > 0 and self.have_miso:
+            self.misobits[1][2] = self.samplenum
+        if self.bitcount > 0 and self.have_mosi:
+            self.mosibits[1][2] = self.samplenum
+
+        self.bitcount += 1
+
+        # Continue to receive if not enough bits were received, yet.
+        if self.bitcount != ws:
+            return
+
+        self.putdata()
+
+        self.reset_decoder_state()
+
+    def find_clk_edge(self, miso, mosi, clk, cs, first):
+        if self.have_cs and (first or (self.matched & (0b1 << self.have_cs))):
+            # Send all CS# pin value changes.
+            oldcs = None if first else 1 - cs
+
+            # Reset decoder state when CS# changes (and the CS# pin is used).
+            self.reset_decoder_state()
+
+        # We only care about samples if CS# is asserted.
+        if self.have_cs and not self.cs_asserted(cs):
+            return
+
+        # Ignore sample if the clock pin hasn't changed.
+        if first or not (self.matched & (0b1 << 0)):
+            return
+
+        # Found the correct clock edge, now get the SPI bit(s).
+        self.handle_bit(miso, mosi, clk, cs)
+
+    def decode(self):
+        # The CLK input is mandatory. Other signals are (individually)
+        # optional. Yet either MISO or MOSI (or both) must be provided.
+        # Tell stacked decoders when we don't have a CS# signal.
         if not self.has_channel(0):
-            raise ChannelError('需要 CLK 通道')
+            raise ChannelError('CLK pin required.')
         self.have_miso = self.has_channel(1)
         self.have_mosi = self.has_channel(2)
         if not self.have_miso and not self.have_mosi:
-            raise ChannelError('需要 MISO 或 MOSI 通道')
+            raise ChannelError('Either MISO or MOSI (or both) pins required.')
+        self.have_cs = self.has_channel(3)
 
-    def put_annot(self, ss, es, ann_type, text):
-        self.put(ss, es, self.out_ann, [ann_type, [text]])
+        # We want all CLK changes. We want all CS changes if CS is used.
+        # Map 'have_cs' from boolean to an integer index. This simplifies
+        # evaluation in other locations.
+        # Sample data on rising/falling clock edge (depends on mode).
+        mode = spi_mode[self.options['cpol'], self.options['cpha']]
+        if mode == 0 or mode == 3:   # Sample on rising clock edge
+            wait_cond = [{0: 'r'}]
+        else: # Sample on falling clock edge
+            wait_cond = [{0: 'f'}]
 
-    def put_python_data(self, ss, es, data_type, data1, data2=None):
-        """輸出 Python 格式數據"""
-        self.put(ss, es, self.out_python, [data_type, data1, data2])
+        if self.have_cs:
+            self.have_cs = len(wait_cond)
+            wait_cond.append({3: 'e'})
 
-    def decode(self):
+        # "Pixel compatibility" with the v2 implementation. Grab and
+        # process the very first sample before checking for edges. The
+        # previous implementation did this by seeding old values with
+        # None, which led to an immediate "change" in comparison.
+        (clk, miso, mosi, cs) = self.wait({})
+        self.find_clk_edge(miso, mosi, clk, cs, True)
+
         while True:
-            # 等待時鐘上升沿和 CS 變化
-            wait_cond = [{0: 'r'}]  # CLK 上升沿
-            if self.has_channel(3):  # 如果有 CS 通道
-                wait_cond.append({3: 'e'})  # CS 邊緣變化
-
             (clk, miso, mosi, cs) = self.wait(wait_cond)
-            
-            if cs == 0 and not self.cs_active:
-                # CS 變化時輸出狀態
-                self.put_python_data(self.samplenum, self.samplenum,
-                                   'CS-CHANGE', None if self.start_sample is None else 1, 0)
-                self.cs_active = True
-                self.bitcount = 0
-                self.word_miso = 0
-                self.word_mosi = 0
-                self.bytecount = 0
-                self.transaction_miso = []
-                self.transaction_mosi = []
-                self.start_sample = self.samplenum
-                self.rw_flag = None
-            
-            # 只在 CS 有效且時鐘為上升沿時採樣
-            if self.cs_active and clk == 1:
-                # 確保有效的信號讀取
-                bit_miso = miso if self.have_miso else 0
-                bit_mosi = mosi if self.have_mosi else 0
-
-                # 記錄採樣點
-                sample_point = self.samplenum
-
-                # 同時處理 MISO 和 MOSI，確保兩路數據都被正確採樣
-                if self.options['bitorder'] == 'msb-first':
-                    if self.have_miso:
-                        self.word_miso = (self.word_miso << 1) | (bit_miso & 0x1)
-                    if self.have_mosi:
-                        self.word_mosi = (self.word_mosi << 1) | (bit_mosi & 0x1)
-                else:
-                    if self.have_miso:
-                        self.word_miso |= (bit_miso & 0x1) << self.bitcount
-                    if self.have_mosi:
-                        self.word_mosi |= (bit_mosi & 0x1) << self.bitcount
-
-                self.bitcount += 1
-                
-                if self.bitcount == 8:
-                    # 輸出每個字節的數據
-                    if self.bytecount > 0:
-                        self.put_python_data(self.start_sample, self.samplenum,
-                                           'DATA', self.word_mosi, self.word_miso)
-
-                    # 首字節特殊處理
-                    if self.bytecount == 0:
-                        # 確保從 MOSI 讀取讀寫標誌
-                        self.rw_flag = self.word_mosi & 0x01
-                        addr = self.word_mosi >> 1
-                        self.put_annot(self.start_sample, self.samplenum, 0,
-                                     f'Addr: 0x{addr:02X}, {"Read" if self.rw_flag else "Write"}')
-
-                    # 保存兩路數據
-                    self.transaction_miso.append(self.word_miso)
-                    self.transaction_mosi.append(self.word_mosi)
-                    
-                    self.word_miso = 0
-                    self.word_mosi = 0
-                    self.bitcount = 0
-                    self.bytecount += 1
-                    
-                    if self.bytecount == 4:
-                        # 輸出完整傳輸數據
-                        mosi_data = []
-                        miso_data = []
-                        for i in range(4):
-                            byte_ss = self.start_sample + (i * 8)
-                            byte_es = byte_ss + 8
-                            mosi_data.append(Data(byte_ss, byte_es, self.transaction_mosi[i]))
-                            miso_data.append(Data(byte_ss, byte_es, self.transaction_miso[i]))
-                        
-                        self.put_python_data(self.start_sample, self.samplenum,
-                                           'TRANSFER', mosi_data, miso_data)
-
-                        # 根據讀寫標誌決定要顯示的數據
-                        if self.rw_flag:
-                            # 讀取操作：只顯示 MISO 數據
-                            data_miso = (self.transaction_miso[1] << 16) | \
-                                      (self.transaction_miso[2] << 8) | \
-                                      self.transaction_miso[3]
-                            self.put_annot(self.start_sample, self.samplenum, 3,
-                                         f'Data Read: 0x{data_miso:06X}')
-                        else:
-                            # 寫入操作：只顯示 MOSI 數據
-                            data_mosi = (self.transaction_mosi[1] << 16) | \
-                                      (self.transaction_mosi[2] << 8) | \
-                                      self.transaction_mosi[3]
-                            self.put_annot(self.start_sample, self.samplenum, 4,
-                                         f'Data Write: 0x{data_mosi:06X}')
-                        
-                        # CS 釋放時輸出狀態
-                        self.put_python_data(self.samplenum, self.samplenum,
-                                           'CS-CHANGE', 0, 1)
-                        self.cs_active = False
+            self.find_clk_edge(miso, mosi, clk, cs, False)
