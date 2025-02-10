@@ -213,7 +213,8 @@ class Decoder(srd.Decoder):
             reg_name = MAX30001_REGISTERS.get(address, "UNKNOWN")
             
             # Add register name annotation
-            self.put(start_ss, end_es, self.out_ann, [2, [reg_name]])
+            suffix = '[R]' if rw_bit else '[W]'
+            self.put(start_ss, end_es, self.out_ann, [2, [f'{reg_name}{suffix}']])
             
             # 根據讀寫位選擇數據來源
             if rw_bit:  # Read operation (r=1)，從 MISO 讀取數據
